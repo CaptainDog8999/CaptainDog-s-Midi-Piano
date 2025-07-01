@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>MIDI Piano</title>
+  <style>
+    body { font-family: sans-serif; text-align: center; padding: 1rem; }
+    .keyboard { display: flex; justify-content: center; flex-wrap: nowrap; overflow-x: auto; margin: auto; padding: 1rem; }
+    .note { width: 24px; height: 120px; border: 1px solid black; background: white; position: relative; display: inline-block; }
+    .note.black { width: 16px; height: 80px; background: black; position: absolute; top: 0; z-index: 1; left: 16px; }
+    .note-label { font-size: 10px; position: absolute; bottom: 2px; width: 100%; text-align: center; }
+    .white-key-wrapper { position: relative; display: inline-block; }
+    .note.active { background: lightblue !important; }
+    .note.black.active { background: #555 !important; }
+    button { margin: 0.5rem; padding: 0.5rem 1rem; font-size: 1rem; }
+    select { margin: 1rem; font-size: 1rem; padding: 0.2rem 0.5rem; }
+  </style>
+</head>
+<body>
+  <h1>MIDI Piano</h1>
+
+  <label for="soundProfile">Sound Profile: </label>
+  <select id="soundProfile">
+    <option value="acoustic_grand_piano">Grand Piano</option>
+    <option value="church_organ">Church Organ</option>
+    <option value="electric_piano_1">Electric Piano</option>
+    <option value="harpsichord">Harpsichord</option>
+    <option value="acoustic_guitar_nylon">Acoustic Guitar</option>
+    <option value="flute">Flute</option>
+    <option value="alto_sax">Alto Saxophone</option>
+    <option value="electric_guitar_clean">Electric Guitar Clean</option>
+  </select>
+
+  <div class="keyboard" id="keyboard"></div>
+  <p>Pitch Bend: <span id="pitchValue">0</span></p>
+  <p>Modulation: <span id="modValue">0</span></p>
+
+  <button id="recordBtn">Start Recording</button>
+  <button id="stopBtn" disabled>Stop & Download</button>
+
+  <script>
+    const keyboard = document.getElementById('keyboard');
+    const pitchDisplay = document.getElementById('pitchValue');
+    const modDisplay = document.getElementById('modValue');
+    const recordBtn = document.getElementById('recordBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const soundProfileSelect = document.getElementById('soundProfile');
+
+    const noteNames = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
+    const notes = {};
+
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    const sampleMap = {};
+    const activeSources = {};
+
+    let pitchBendValue = 0;
+    let modulationValue = 0;
+    let currentProfile = 'acoustic_grand_piano';
+
+    const dest = audioContext.createMediaStreamDestination();
+
+    function getSampleURL(profile, noteName) {
+      return `https://cdn.jsdelivr.net/gh/gleitz/midi-js-soundfonts@gh-pages/FluidR3_GM/${profile}-mp3/${noteName}.mp3`;
+    }
+
+    const baseNote = 60;
+    let baseNoteName = 'C4';
+
+    function loadSampleForProfile(profile) {
+      const url = getSampleURL(profile, baseNoteName);
+      return fetch(url)
+        .then(res => {
+          if (!res.ok) throw new Error(`Sample not found: ${url}`);
+          return res.arrayBuffer();
+        })
+        .then(buffer => audioContext.decodeAudioData(buffer))
+        .then(decoded => {
+          sampleMap[profile] = decoded;
+        })
+        .catch(err => {
+          alert(`Error loading sample for ${profile}: ${err.message}`);
+        });
+    }
+
+    function playSample(note) {
+      if (!sampleMap[currentProfile]) return;
+
+      const source = audioContext.createBufferSource();
+      source.buffer = sampleMap[currentProfile];
+
+      const playbackRate = Math.pow(2, (note - baseNote + pitchBendValue) / 12);
+      source.playbackRate.setValueAtTime(playbackRate, audioContext.currentTime);
+
+      const gainNode = audioContext.createGain();
+      gainNode.gain.setValueAtTime(0.5, audioContext.currentTime);
+
+      const modOsc = audioContext.createOscillator();
+      const modGain = audioContext.createGain();
+      modOsc.frequency.value = 5;
+      modGain.gain.value = modulationValue / 1000;
+      modOsc.connect(modGain);
+      modGain.connect(gainNode.gain);
+      modOsc.start();
+
+      gainNode.connect(audioContext.destination);
+      gainNode.connect(dest);
+
+      source.connect(gainNode);
+      source.start();
+
+      return { source, modOsc, modGain, gainNode, note, basePlaybackRate: Math.pow(2, (note - baseNote) / 12) };
+    }
+
+    for (let midi = 21; midi <= 108; midi++) {
+      const noteName = noteNames[midi % 12] + Math.floor(midi / 12 - 1);
+      const isBlack = noteName.includes('#');
+
+      if (!isBlack) {
+        const whiteWrapper = document.createElement('div');
+        whiteWrapper.className = 'white-key-wrapper';
+
+        const whiteKey = document.createElement('div');
+        whiteKey.className = 'note';
+        whiteKey.dataset.note = midi;
+
+        const label = document.createElement('div');
+        label.className = 'note-label';
+        label.textContent = noteName;
+        whiteKey.appendChild(label);
+
+        whiteWrapper.appendChild(whiteKey);
+        keyboard.appendChild(whiteWrapper);
+        notes[midi] = whiteKey;
+      } else {
+        const blackKey = document.createElement('div');
+        blackKey.className = 'note black';
+        blackKey.dataset.note = midi;
+        notes[midi] = blackKey;
+
+        const lastWhite = keyboard.lastElementChild;
+        if (lastWhite) lastWhite.appendChild(blackKey);
+      }
+    }
+
+    function updateAllSourcesPitchAndMod() {
+      for (const key in activeSources) {
+        const obj = activeSources[key];
+        const newRate = obj.basePlaybackRate * Math.pow(2, pitchBendValue / 12);
+        obj.source.playbackRate.setValueAtTime(newRate, audioContext.currentTime);
+        obj.modGain.gain.setValueAtTime(modulationValue / 1000, audioContext.currentTime);
+      }
+    }
+
+    function onMIDIMessage(message) {
+      const [status, data1, data2] = message.data;
+      const command = status & 0xf0;
+
+      if (command === 0x90 && data2 > 0) {
+        if (notes[data1]) notes[data1].classList.add('active');
+        activeSources[data1] = playSample(data1);
+      } else if ((command === 0x80) || (command === 0x90 && data2 === 0)) {
+        if (notes[data1]) notes[data1].classList.remove('active');
+        const obj = activeSources[data1];
+        if (obj) {
+          try {
+            obj.source.stop();
+            obj.modOsc.stop();
+          } catch (e) {}
+          delete activeSources[data1];
+        }
+      } else if (command === 0xE0) {
+        const value = ((data2 << 7) + data1) - 8192;
+        pitchBendValue = value / 8192 * 2;
+        pitchDisplay.textContent = pitchBendValue.toFixed(2);
+        updateAllSourcesPitchAndMod();
+      } else if (command === 0xB0 && data1 === 1) {
+        modulationValue = data2;
+        modDisplay.textContent = modulationValue;
+        updateAllSourcesPitchAndMod();
+      }
+    }
+
+    function onMIDISuccess(midiAccess) {
+      for (const input of midiAccess.inputs.values()) {
+        input.onmidimessage = onMIDIMessage;
+      }
+    }
+
+    function onMIDIFailure() {
+      alert('Could not access your MIDI devices.');
+    }
+
+    let mediaRecorder;
+    let recordedChunks = [];
+
+    recordBtn.onclick = () => {
+      if (!mediaRecorder) {
+        mediaRecorder = new MediaRecorder(dest.stream);
+
+        mediaRecorder.ondataavailable = (e) => {
+          if (e.data.size > 0) recordedChunks.push(e.data);
+        };
+
+        mediaRecorder.onstop = () => {
+          const blob = new Blob(recordedChunks, { type: 'audio/webm' });
+          recordedChunks = [];
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.style.display = 'none';
+          a.href = url;
+          a.download = 'midi-piano-recording.webm';
+          document.body.appendChild(a);
+          a.click();
+          URL.revokeObjectURL(url);
+          document.body.removeChild(a);
+        };
+      }
+      mediaRecorder.start();
+      recordBtn.disabled = true;
+      stopBtn.disabled = false;
+    };
+
+    stopBtn.onclick = () => {
+      if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+        mediaRecorder.stop();
+        recordBtn.disabled = false;
+        stopBtn.disabled = true;
+      }
+    };
+
+    soundProfileSelect.onchange = () => {
+      currentProfile = soundProfileSelect.value;
+      loadSampleForProfile(currentProfile);
+    };
+
+    loadSampleForProfile(currentProfile).then(() => {
+      if (navigator.requestMIDIAccess) {
+        navigator.requestMIDIAccess().then(onMIDISuccess, onMIDIFailure);
+      } else {
+        alert('Web MIDI API not supported in this browser.');
+      }
+    });
+  </script>
+</body>
+</html>
